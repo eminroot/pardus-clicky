@@ -168,6 +168,52 @@ To add support for an app in a new session:
    `~/.cache/pardus-clicky/clicky.log` (every step logs its tool call and timing).
 5. Add the verified requests to the README table.
 
+## Offline mode (session 2)
+
+Requests go through `router.py`: `recipes/matcher.py` picks a recipe
+(MiniLM sentence embeddings over each recipe's `examples`, word overlap if
+the model is missing; threshold 0.45, off-topic requests score below 0.35);
+the recipe's `parse` pulls out details (app, item, name, on/off, percent);
+the recipe runs through `recipes/context.py` (`Ctx`). No match, or a recipe
+raising `RecipeFailed`, hands the request to the online agent when allowed.
+`perform.py` (`Hands`) is shared by both: fly, speak, act, settle, guide mode.
+
+Finding things by name, no screenshots:
+- GNOME Shell UI (panel, app grid, system menu, calendar): extension method
+  `FindElements` (`lib/elements.js`). Types worth knowing: `ShowAppsIcon`,
+  `TaskbarAppIcon` (has `app_id`), `AppIcon`, `QuickSettings`,
+  `DarkModeToggle`, `LockItem`, `ShutdownItem`, `ScreenshotItem`, `Slider`
+  (has `value`), `DateMenuButton`, `TodayButton`.
+- App windows and the desktop icons: `a11y.py` (AT-SPI).
+- `scripts/dev/elements.py shell|a11y [name]` lists what can be found;
+  `scripts/dev/match.py "sentence"` shows which recipe a sentence runs;
+  `scripts/dev/run_batch.sh out "req 1" "req 2"` runs requests in the VM
+  with screenshots and timing.
+
+Writing a recipe: add a function with `@recipe(id, examples, parse, keywords)`
+in `recipes/*.py`; 6 to 12 varied examples; `parse` returns None when it
+can't handle the text (then the next recipe is tried, only if its score is
+within 0.12). Narration goes through `_()` for translation. Check it with
+`match.py` (also sentences that must NOT match), then live with `run_batch.sh`.
+
+Gotchas found the hard way:
+- libatspi is not thread-safe and caches: queries run on the GTK main loop and
+  clear the cache first (`a11y.run_on_main_loop`), or new menus are invisible.
+- GTK 4 on Wayland reports garbage SCREEN extents; use WINDOW extents plus the
+  compositor's window origin (frame for windows, buffer for popups). Popups
+  are matched by size, not pid (the desktop icons' pids differ between AT-SPI
+  and Mutter). A submenu is a separate popup filed inside its parent menu.
+- While a panel menu is open, moving over another panel button swaps menus
+  (it opened the Weather app once). `glideTo` leaves the panel vertically.
+- The desktop icons put zero-width spaces in file names; `norm()` strips them.
+- Firefox is "Firefox ESR"; apps also match by short and generic names.
+
+Left to do (desktop): verify the submenu fix (new document, sort) in the VM;
+skip opening a panel menu that is already open; key alias for Print Screen;
+retry the desktop right-click once; find the screenshot UI's capture button;
+an end-to-end test with the VM's network off; Turkish phrases in
+`i18n.TRANSLATIONS["tr"]` plus Whisper `small` and a Turkish Piper voice.
+
 ## The test VM
 
 The owner develops on Windows; Pardus runs in **VMware Workstation**:

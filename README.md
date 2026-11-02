@@ -13,7 +13,27 @@ Built for the TEKNOFEST Pardus competition. This is the **desktop** part of a
 larger project that will add one Pardus app per development session (terminal,
 whiteboard, music player, ...). See [AGENTS.md](AGENTS.md) for the plan.
 
-## What works today
+## Works without internet
+
+Desktop tasks run fully on the computer: Whisper hears you, Piper speaks,
+and about 35 built-in recipes do the work. Each recipe finds the buttons by
+name (through the shell extension and the accessibility tree), so it takes
+the same steps every time and never sends a screenshot anywhere. The OpenAI
+model is only a fallback for requests no recipe covers, and you can switch
+that off (Settings > "Use the internet for things I don't know").
+
+Offline recipes, all for the desktop: open, close, minimise, maximise and
+switch apps; show the desktop; new folder, new document, rename, delete
+(asks first), open, move into a folder, organise the desktop by file type,
+arrange and sort icons, select all, empty the trash (asks first); wallpaper,
+dark style, accent color; volume and mute; lock, restart, log out, power off
+(all ask first); screenshot; time and date, calendar, do not disturb, clear
+notifications; a desktop tour, "where is ...", help.
+
+Measured in the VM: speech recognized in about 1.5 s, a recipe step in 4 to
+8 s, request matching in under 70 ms.
+
+## What works today (online agent, session 1)
 
 Tested end to end on Pardus 25.2 GNOME (GNOME 48, Wayland) in a VM:
 
@@ -99,6 +119,9 @@ which ship with Pardus. The installer adds the panel-icon library if missing.
 | Key | Default | Meaning |
 |---|---|---|
 | `language` | `en` | `en` or `tr`: spoken language and captions |
+| `brain` | `auto` | `auto`: recipes first, online model for the rest; `local`: never go online; `cloud`: always the online model |
+| `voice_engine` | `auto` | `auto` uses Whisper and Piper when installed, else OpenAI |
+| `whisper_beam` | `1` | higher is a little more accurate and slower |
 | `performer` | `assistant` | default when the request does not say: `assistant` does it, `user` points |
 | `model` | `gpt-5.6-terra` | model that looks at the screen and plans each step |
 | `reasoning_effort` | `low` | |
@@ -125,6 +148,11 @@ pardus-clicky listen          start or stop listening (what Super+Z runs)
 pardus-clicky ask "TEXT"      run a typed request
 pardus-clicky stop            stop the current task
 pardus-clicky doctor          check this computer
+pardus-clicky setup-local     download the offline models again
 ```
+
+The installer creates `~/.local/share/pardus-clicky/venv` (faster-whisper,
+piper-tts) and downloads about 0.6 GB of models to
+`~/.local/share/pardus-clicky/models`. Set `CLICKY_SKIP_LOCAL=1` to skip that.
 
 Log: `~/.cache/pardus-clicky/clicky.log`.

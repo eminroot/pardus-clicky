@@ -22,6 +22,17 @@ if ((${#need[@]})); then
     sudo apt-get install -y "${need[@]}"
 fi
 
+# Offline mode: Whisper (hearing), Piper (voice) and a small sentence model, in a
+# venv that still sees the system GTK. About 0.6 GB of models, downloaded once.
+VENV="${XDG_DATA_HOME:-$HOME/.local/share}/pardus-clicky/venv"
+if [[ "${CLICKY_SKIP_LOCAL:-}" != 1 ]]; then
+    python3 -c 'import ensurepip' 2>/dev/null || sudo apt-get install -y python3-venv
+    [[ -x "$VENV/bin/python" ]] || python3 -m venv --system-site-packages "$VENV"
+    "$VENV/bin/pip" install -q --upgrade pip
+    "$VENV/bin/pip" install -q faster-whisper piper-tts
+    "$ROOT/bin/pardus-clicky" setup-local
+fi
+
 mkdir -p "$EXT_DIR" "$APPS_DIR" "$AUTOSTART_DIR"
 ln -sfn "$ROOT/extension/$UUID" "$EXT_DIR/$UUID"
 python3 - "$UUID" <<'PY'

@@ -126,7 +126,7 @@ class A11y:
                 continue
             for frame, title in frames:
                 place = self._placement(frame, pid, title, titles, surfaces)
-                self._walk(frame, app_name, title or (titles[0] if titles else ""), place, out, budget, 0)
+                self._walk(frame, app_name, title or (titles[0] if titles else ""), place, out, budget, 0, surfaces)
         return out
 
     def find(self, name=None, role=None, app=None, window=None, exact=False, states=()):
@@ -172,7 +172,7 @@ class A11y:
             popup = _popup_surface(frame, surfaces)
             if popup:
                 bx, by, bw, bh = popup["buffer"]
-                return Atspi.CoordType.WINDOW, bx, by, (bx, by, bw, bh)
+                return Atspi.CoordType.WINDOW, bx, by, (bx, by, bw, bh), popup
         match = [s for s in same_pid if title and s.get("title") == title] or \
                 [s for s in same_pid if s.get("title") in titles and s.get("title")] or same_pid
         clip = None
@@ -180,18 +180,26 @@ class A11y:
             s = match[0]
             clip = (s["x"], s["y"], s["w"], s["h"])
         if _screen_coords_work(frame) or not match:
-            return Atspi.CoordType.SCREEN, 0, 0, None if not title else clip
-        return Atspi.CoordType.WINDOW, match[0]["x"], match[0]["y"], clip
+            return Atspi.CoordType.SCREEN, 0, 0, None if not title else clip, None
+        return Atspi.CoordType.WINDOW, match[0]["x"], match[0]["y"], clip, None
 
-    def _walk(self, node, app_name, title, place, out, budget, depth):
+    def _walk(self, node, app_name, title, place, out, budget, depth, surfaces=None):
         if depth > 40 or budget[0] <= 0:
             return
         budget[0] -= 1
-        coord, dx, dy, clip = place
+        coord, dx, dy, clip, popup = place
         try:
             state = node.get_state_set()
             if not state.contains(Atspi.StateType.SHOWING):
                 return
+            if popup is not None:
+                # A submenu is its own popup window, but AT-SPI files it inside
+                # the parent menu with coordinates relative to itself. A container
+                # at 0,0 with the size of another popup window starts such a part.
+                inner = _popup_surface(node, surfaces or [], exclude=popup)
+                if inner:
+                    bx, by, bw, bh = inner["buffer"]
+                    place = coord, dx, dy, clip, popup = Atspi.CoordType.WINDOW, bx, by, (bx, by, bw, bh), inner
             name = node.get_name() or ""
             role = node.get_role_name() or ""
             if name:
@@ -211,22 +219,22 @@ class A11y:
             except GLib.Error:
                 continue
             if child is not None:
-                self._walk(child, app_name, title, place, out, budget, depth + 1)
+                self._walk(child, app_name, title, place, out, budget, depth + 1, surfaces)
 
 
 POPUP_TYPES = {"dropdown_menu", "popup_menu", "menu", "combo", "tooltip", "utility", "override_other", "dialog",
                "modal_dialog"}
 
 
-def _popup_surface(frame, surfaces):
-    """The compositor's popup window for an untitled AT-SPI top-level (same process, same size)."""
+def _popup_surface(frame, surfaces, exclude=None):
+    """The compositor's popup window for an AT-SPI node at 0,0 with that popup's size."""
     try:
         ext = frame.get_extents(Atspi.CoordType.WINDOW)
     except GLib.Error:
         return None
-    if ext.width <= 2 or ext.height <= 2:
+    if ext.width <= 2 or ext.height <= 2 or (exclude is not None and (ext.x or ext.y)):
         return None
-    popups = [s for s in surfaces if s.get("type") in POPUP_TYPES]
+    popups = [s for s in surfaces if s.get("type") in POPUP_TYPES and s is not exclude]
     for s in popups:
         bw, bh = s["buffer"][2], s["buffer"][3]
         if abs(bw - ext.width) <= 2 and abs(bh - ext.height) <= 2:
