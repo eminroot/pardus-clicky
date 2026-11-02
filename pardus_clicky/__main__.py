@@ -8,6 +8,7 @@
     pardus-clicky settings        open settings
     pardus-clicky quit            quit the running app
     pardus-clicky doctor          check that this computer has everything Clicky needs
+    pardus-clicky setup-local     download the offline speech and understanding models
 """
 
 import sys
@@ -46,6 +47,16 @@ def main():
     if cmd == "doctor":
         from .doctor import run
         return run()
+    if cmd == "setup-local":
+        from . import models
+        from .config import Config
+        lang = args[1] if len(args) > 1 else Config.load().get("language", "en")
+        try:
+            print(models.download(lang))
+        except ImportError:
+            print("The local AI packages are missing; run scripts/install.sh first.")
+            return 1
+        return 0
     if cmd in REMOTE and _remote(cmd):
         return 0
     if cmd in ("stop", "quit"):

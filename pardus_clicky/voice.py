@@ -154,14 +154,12 @@ class Recorder:
         return to_wav(bytes(pcm[start:]))
 
 
-TTS_RATE = 24000  # OpenAI "pcm" output: 24 kHz, 16-bit, mono
-
-
 class Utterance:
-    """A sentence whose audio is being downloaded in the background."""
+    """A sentence whose audio is being made (or downloaded) in the background."""
 
-    def __init__(self, text):
+    def __init__(self, text, rate):
         self.text = text
+        self.rate = rate
         self.chunks = queue.Queue()
         self.failed = False
         self.done = threading.Event()
@@ -172,22 +170,21 @@ class Utterance:
 
 
 class Speaker:
-    """Speaks short sentences with OpenAI TTS, streaming so playback starts at
-    the first audio bytes; falls back to speech-dispatcher when offline."""
+    """Speaks short sentences through a TTS engine (Piper on the computer, or
+    OpenAI), streaming so playback starts at the first audio; falls back to
+    speech-dispatcher when the engine fails.
 
-    INSTRUCTIONS = {
-        "en": "Speak English in a warm, calm and clear voice, like a patient teacher sitting next to the user. Natural, relaxed pace.",
-        "tr": "Türkçe konuş. Sıcak, sakin ve net bir sesle, kullanıcının yanında oturan sabırlı bir öğretmen gibi. Doğal ve rahat bir tempo.",
-    }
+    An engine has `rate` (Hz) and `stream(text)` yielding 16-bit mono PCM.
+    """
 
-    def __init__(self, api, config):
-        self.api = api
+    def __init__(self, engine, config):
+        self.engine = engine
         self.config = config
         self._pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="tts")
         self._stop = threading.Event()
 
     def prefetch(self, text):
-        utterance = Utterance(text)
+        utterance = Utterance(text, self.engine.rate)
         if text and self.config.get("speak", True):
             self._pool.submit(self._fetch, utterance)
         else:
@@ -206,17 +203,16 @@ class Speaker:
         self._stop.set()
 
     def _fetch(self, utterance):
-        lang = self.config.get("language", "en")
         started = time.monotonic()
         first = True
         try:
-            for data in self.api.speech_stream(utterance.text, self.config["tts_model"], self.config["voice"],
-                                               instructions=self.INSTRUCTIONS.get(lang)):
+            for data in self.engine.stream(utterance.text):
                 if first:
                     log.info("tts first audio after %.2fs", time.monotonic() - started)
+                    utterance.rate = self.engine.rate
                     first = False
                 utterance.chunks.put(data)
-        except ApiError as exc:
+        except (ApiError, OSError, RuntimeError, ValueError) as exc:
             log.warning("tts failed, using speech-dispatcher: %s", exc)
             utterance.failed = True
         finally:
@@ -241,7 +237,7 @@ class Speaker:
                 self._spd(utterance.text)
             return
         pipe = Gst.parse_launch(
-            f"appsrc name=src format=time caps=audio/x-raw,format=S16LE,rate={TTS_RATE},channels=1,layout=interleaved "
+            f"appsrc name=src format=time caps=audio/x-raw,format=S16LE,rate={utterance.rate},channels=1,layout=interleaved "
             "! audioconvert ! audioresample ! autoaudiosink name=out")
         src, out = pipe.get_by_name("src"), pipe.get_by_name("out")
         pipe.set_state(Gst.State.PLAYING)
@@ -255,7 +251,7 @@ class Speaker:
                 if usable:
                     buf = Gst.Buffer.new_wrapped(pending[:usable])
                     buf.pts = pts
-                    buf.duration = usable // 2 * Gst.SECOND // TTS_RATE
+                    buf.duration = usable // 2 * Gst.SECOND // utterance.rate
                     pts += buf.duration
                     src.emit("push-buffer", buf)
                     pending = pending[usable:]

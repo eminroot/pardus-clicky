@@ -61,9 +61,18 @@ def run():
     report(OK if version else FAIL, f"shell helper {'v' + version if version else 'not running'}",
            "run scripts/install.sh, then log out and back in once")
 
+    from . import local_ai
     from .config import Config
     cfg = Config.load()
-    report(OK if cfg.api_key else FAIL, "OpenAI API key", "put it in ~/.config/pardus-clicky/openai.key or Settings")
+    lang = cfg.get("language", "en")
+    have = local_ai.available(lang)
+    for part, what in (("whisper", "offline speech recognition (Whisper)"), ("piper", "offline voice (Piper)"),
+                       ("embedder", "offline understanding (MiniLM)")):
+        report(OK if have[part] else WARN, what, "run scripts/install.sh (or pardus-clicky setup-local)")
+    offline = have["whisper"] and have["piper"]
+    report(OK if cfg.api_key or offline else FAIL,
+           "OpenAI API key" if cfg.api_key else "no OpenAI key: offline recipes only" if offline else "OpenAI API key",
+           "put it in ~/.config/pardus-clicky/openai.key or Settings")
     if cfg.api_key:
         try:
             req = urllib.request.Request(cfg.get("openai_base_url", "https://api.openai.com/v1") + "/models",

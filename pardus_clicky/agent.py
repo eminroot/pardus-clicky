@@ -1,31 +1,23 @@
-"""The guide's loop: screenshot -> model -> one visible step -> new screenshot.
+"""The online guide: screenshot -> model -> one visible step -> new screenshot.
 
-Each model turn is exactly one tool call (see tools.py). Requests are
-stateless (store=false): the conversation is kept here, with encrypted
-reasoning passed back and only the last few screenshots kept as images.
+Used for requests no offline recipe covers (see router.py). Each model turn is
+exactly one tool call (see tools.py). Requests are stateless (store=false):
+the conversation is kept here, with encrypted reasoning passed back and only
+the last few screenshots kept as images.
 """
 
 import json
 import logging
-import threading
 import time
 
 from . import i18n, prompts, tools, vision
 from .openai_api import ApiError
+from .perform import USER_ACTIONS, Cancelled
 from .shell import ShellError
 
 log = logging.getLogger(__name__)
 
 KEEP_IMAGES = 2
-WATCH_INTERVAL = 0.6
-USER_WAIT_LIMIT = 120.0
-NUDGE_AFTER = 25.0
-CHANGE_THRESHOLD = 0.006
-USER_ACTIONS = ("click", "double_click", "right_click", "drag", "scroll", "type", "keys")
-
-
-class Cancelled(Exception):
-    pass
 
 
 class Clock:
@@ -62,11 +54,6 @@ def trim_images(items, keep=KEEP_IMAGES):
     return out
 
 
-def split_combos(keys):
-    """'ctrl+a, BackSpace' -> ['ctrl+a', 'BackSpace']. Commas or spaces separate key presses."""
-    return [c for c in keys.replace(",", " ").split() if c.strip("+")]
-
-
 def scale_shape(shape, shot):
     """Map a draw-tool shape from screenshot pixels to screen coordinates."""
     k = shot.stage_width / shot.width
@@ -85,53 +72,45 @@ def scale_shape(shape, shot):
     return out
 
 
+USER_OUTCOMES = {
+    "changed": "The user did it: the screen changed.",
+    "assistant": "The user asked you to do this step, so you did it.",
+    "next": "The user says they did it.",
+    "timeout": "The user has not done it after two minutes.",
+}
+
+
 class Agent:
-    def __init__(self, api, driver, speaker, config, listen):
+    def __init__(self, api, hands, config):
         self.api = api
-        self.driver = driver
-        self.speaker = speaker
+        self.hands = hands
+        self.driver = hands.driver
         self.config = config
-        self.listen = listen
-        self.running = False
-        self.waiting_for_user = False
-        self._cancel = threading.Event()
-        self._interject = threading.Event()
 
-    # ---- control from the app ----
-
-    def cancel(self):
-        self._cancel.set()
-        self.speaker.stop()
-
-    def interject(self):
-        """The user pressed the hotkey while Clicky waits for them to do a step."""
-        self._interject.set()
-
-    # ---- the loop ----
-
-    def run(self, request):
-        self.running = True
-        self._cancel.clear()
-        self._interject.clear()
+    def run(self, request, note=""):
+        """Work on `request` until finished. `note` tells the model what already happened."""
         d = self.driver
+        self.hands.check()
         try:
-            d.clear_drawings()
             d.rings_off()
             d.set_state("thinking")
             shot, state = self._look()
+            text = prompts.first_message(request, state, shot)
+            if note:
+                text += f"\n\nNote: {note}"
             items = [{"role": "user", "content": [
-                {"type": "input_text", "text": prompts.first_message(request, state, shot)},
+                {"type": "input_text", "text": text},
                 {"type": "input_image", "image_url": shot.data_url(), "detail": "high"},
             ]}]
             for _ in range(int(self.config.get("max_steps", 30))):
-                self._check()
+                self.hands.check()
                 output = self._think(items, state).get("output", [])
                 items.extend(o for o in output if o.get("type") in ("reasoning", "function_call", "message"))
                 calls = [o for o in output if o.get("type") == "function_call"]
                 if not calls:
                     said = " ".join(c.get("text", "") for o in output if o.get("type") == "message"
                                     for c in o.get("content", []))
-                    self._say(said.strip() or i18n.text(self.config, "error"))
+                    self.hands.say(said.strip() or i18n.text(self.config, "error"))
                     return
                 call = calls[0]
                 for extra in calls[1:]:
@@ -143,17 +122,17 @@ class Agent:
                     args = {}
                 log.info("tool %s %s", call["name"], json.dumps(args, ensure_ascii=False)[:300])
                 if call["name"] == "finish":
-                    self._say(args.get("say", ""))
+                    self.hands.say(args.get("say", ""))
                     return
                 result = self._dispatch(call["name"], args, shot)
-                self._check()
+                self.hands.check()
                 d.set_state("thinking")
                 shot, state = self._look()
                 items.append({"type": "function_call_output", "call_id": call["call_id"], "output": [
                     {"type": "input_text", "text": f"{result}\n\n{prompts.describe_state(state, shot)}"},
                     {"type": "input_image", "image_url": shot.data_url(), "detail": "high"},
                 ]})
-            self._say(i18n.text(self.config, "too_many_steps"))
+            self.hands.say(i18n.text(self.config, "too_many_steps"))
         except Cancelled:
             log.info("task cancelled")
         except ApiError as exc:
@@ -162,18 +141,6 @@ class Agent:
         except ShellError as exc:
             log.error("shell error: %s", exc)
             self._say_safely(i18n.text(self.config, "error"))
-        finally:
-            self.running = False
-            self.waiting_for_user = False
-            for fn, args in ((d.rings_off, ()), (d.home, ()), (d.set_state, ("idle",))):
-                try:
-                    fn(*args)
-                except ShellError:
-                    pass
-
-    def _check(self):
-        if self._cancel.is_set():
-            raise Cancelled()
 
     def _look(self):
         started = time.monotonic()
@@ -218,7 +185,6 @@ class Agent:
     # ---- tools ----
 
     def _step(self, args, shot):
-        d = self.driver
         action = args.get("action") or "point"
         performer = args.get("performer") or self.config.get("performer", "assistant")
         target = None
@@ -228,129 +194,37 @@ class Agent:
             return f"Error: {action} needs x and y."
         if action == "drag" and (args.get("x2") is None or args.get("y2") is None):
             return "Error: drag needs x2 and y2."
+        end = shot.to_stage(args["x2"], args["y2"]) if action == "drag" else None
 
         clock = Clock()
-        speech = self.speaker.play_async(self.speaker.prefetch(args.get("say", "")))
-        d.caption(args.get("say", ""), "say")
-        d.set_state("speaking")
-        if target:
-            d.fly_to(*target, args.get("label", ""))
-            clock.mark("fly")
-        speech.wait(60)
-        clock.mark("speech")
-        self._check()
-
+        self.hands.show(args.get("say", ""), target, args.get("label", ""))
+        clock.mark("show")
         try:
             if action == "point":
                 return "Shown to the user."
             if action == "wait":
                 time.sleep(1.5)
                 return "Waited 1.5 seconds."
+
+            def perform():
+                self.hands.act(action, target, end=end, text=args.get("text"), keys=args.get("keys"),
+                               amount=args.get("amount"))
+
             if performer == "user" and action in USER_ACTIONS:
-                return self._wait_for_user(action, target, args, shot)
-            d.set_state("acting")
-            self._perform(action, target, args, shot)
+                outcome, reply = self.hands.wait_for_user(target, perform)
+                if outcome == "said":
+                    return f'While you waited, the user said: "{reply}"'
+                return USER_OUTCOMES[outcome]
+            perform()
             clock.mark("act")
-            self._settle()
-            clock.mark("settle")
-            d.home()
             return "Done."
         finally:
             log.info("step timing: %s", clock)
 
-    def _perform(self, action, target, args, shot):
-        d = self.driver
-        if action in ("click", "double_click", "right_click"):
-            d.glide(*target)
-            d.ring(*target, "click")
-            d.click("right" if action == "right_click" else "left", 2 if action == "double_click" else 1)
-        elif action == "drag":
-            end = shot.to_stage(args["x2"], args["y2"])
-            d.glide(*target)
-            d.button("left", True)
-            time.sleep(0.2)
-            d.glide(*end, 900)
-            time.sleep(0.2)
-            d.button("left", False)
-        elif action == "scroll":
-            if target:
-                d.glide(*target)
-            d.scroll(args.get("amount") or 3)
-        elif action == "type":
-            # No click here: a click would drop a selection the user expects to
-            # be replaced (rename boxes open with the old name selected).
-            if target:
-                d.glide(*target)
-            d.type_text(args.get("text") or "")
-        elif action == "keys":
-            for combo in split_combos(args.get("keys") or ""):
-                d.keys(combo)
-                time.sleep(0.12)
-
-    def _settle(self, max_wait=3.0):
-        """Wait until the screen stops changing after an action (menus, windows opening)."""
-        time.sleep(0.6)
-        previous = vision.fingerprint(self.driver)
-        started = time.monotonic()
-        while time.monotonic() - started < max_wait:
-            time.sleep(0.3)
-            current = vision.fingerprint(self.driver)
-            if previous.changed_fraction(current) < 0.002:
-                return
-            previous = current
-
-    def _wait_for_user(self, action, target, args, shot):
-        d = self.driver
-        self.waiting_for_user = True
-        if target:
-            d.ring(*target, "attention")
-        d.set_state("waiting")
-        try:
-            base = vision.fingerprint(d)
-            started = time.monotonic()
-            nudged = False
-            while True:
-                self._check()
-                if self._interject.is_set():
-                    self._interject.clear()
-                    reply = self.listen()
-                    verdict = i18n.classify(reply, self.config.get("language", "en"))
-                    if verdict == "stop":
-                        raise Cancelled()
-                    if verdict == "do_it":
-                        d.rings_off()
-                        d.set_state("acting")
-                        self._perform(action, target, args, shot)
-                        self._settle()
-                        d.home()
-                        return "The user asked you to do this step, so you did it."
-                    if verdict == "next":
-                        return "The user says they did it."
-                    if reply:
-                        return f'While you waited, the user said: "{reply}"'
-                    d.set_state("waiting")
-                    base = vision.fingerprint(d)
-                    continue
-                time.sleep(WATCH_INTERVAL)
-                if base.changed_fraction(vision.fingerprint(d)) > CHANGE_THRESHOLD:
-                    time.sleep(0.6)
-                    return "The user did it: the screen changed."
-                elapsed = time.monotonic() - started
-                if not nudged and elapsed > NUDGE_AFTER:
-                    nudged = True
-                    self._say(i18n.text(self.config, "nudge"))
-                    d.set_state("waiting")
-                    base = vision.fingerprint(d)
-                if elapsed > USER_WAIT_LIMIT:
-                    return "The user has not done it after two minutes."
-        finally:
-            self.waiting_for_user = False
-            d.rings_off()
-
     def _draw(self, args, shot):
         d = self.driver
         shapes = [scale_shape(s, shot) for s in args.get("shapes") or []]
-        speech = self.speaker.play_async(self.speaker.prefetch(args.get("say", "")))
+        speech = self.hands.speaker.play_async(self.hands.speaker.prefetch(args.get("say", "")))
         if args.get("clear_first"):
             d.clear_drawings()
         d.caption(args.get("say", ""), "say")
@@ -360,22 +234,14 @@ class Agent:
         return f"Drew {len(shapes)} shape(s). They stay on screen."
 
     def _ask(self, args):
-        self._say(args.get("question", ""))
-        reply = self.listen()
+        self.hands.say(args.get("question", ""))
+        reply = self.hands.listen()
         if not reply:
             return "The user did not answer."
         return f'The user answered: "{reply}"'
 
-    def _say(self, text):
-        if not text:
-            return
-        speech = self.speaker.prefetch(text)
-        self.driver.caption(text, "say")
-        self.driver.set_state("speaking")
-        self.speaker.play(speech)
-
     def _say_safely(self, text):
         try:
-            self._say(text)
-        except ShellError:
-            self.speaker.say(text)
+            self.hands.say(text)
+        except (ShellError, Cancelled):
+            self.hands.speaker.say(text)

@@ -1,5 +1,19 @@
 """User-facing words in English and Turkish."""
 
+# Sentences spoken by the offline recipes are written in English and wrapped
+# in _(); the Turkish session fills TRANSLATIONS["tr"] (English text -> Turkish).
+TRANSLATIONS = {"tr": {}}
+_language = "en"
+
+
+def set_language(lang):
+    global _language
+    _language = lang
+
+
+def _(text):
+    return TRANSLATIONS.get(_language, {}).get(text, text)
+
 MESSAGES = {
     "en": {
         "warming": "One moment...",
@@ -12,6 +26,7 @@ MESSAGES = {
         "no_key": "I need an OpenAI API key first. Open my settings from the icon in the panel.",
         "no_shell": "My pointer helper isn't running. Log out and back in once, then try again.",
         "error": "Something went wrong, so I stopped.",
+        "unknown_offline": "I don't know that one without the internet yet. Try: open the calculator, change the wallpaper, or make a folder.",
         "menu_talk": "Talk to Clicky",
         "menu_type": "Type a request...",
         "menu_stop": "Stop",
@@ -20,6 +35,7 @@ MESSAGES = {
         "ask_title": "What should I show you?",
         "ask_hint": "For example: show me how to change the wallpaper",
         "settings_title": "Clicky settings",
+        "settings_online": "Use the internet for things I don't know",
         "settings_key": "OpenAI API key",
         "settings_language": "Language",
         "settings_speak": "Speak answers out loud",
@@ -41,6 +57,7 @@ MESSAGES = {
         "no_key": "Önce bir OpenAI API anahtarı gerekiyor. Paneldeki simgeden ayarlarımı aç.",
         "no_shell": "İşaretçi yardımcım çalışmıyor. Bir kez oturumu kapatıp yeniden aç, sonra tekrar dene.",
         "error": "Bir şeyler ters gitti, bu yüzden durdum.",
+        "unknown_offline": "Bunu internet olmadan henüz bilmiyorum. Şunları deneyebilirsin: hesap makinesini aç, arka planı değiştir ya da klasör oluştur.",
         "menu_talk": "Clicky ile konuş",
         "menu_type": "İsteğini yaz...",
         "menu_stop": "Durdur",
@@ -49,6 +66,7 @@ MESSAGES = {
         "ask_title": "Sana ne göstereyim?",
         "ask_hint": "Örneğin: masaüstü arka planını nasıl değiştiririm",
         "settings_title": "Clicky ayarları",
+        "settings_online": "Bilmediğim işler için interneti kullan",
         "settings_key": "OpenAI API anahtarı",
         "settings_language": "Dil",
         "settings_speak": "Cevapları sesli söyle",
@@ -74,6 +92,27 @@ INTERJECTIONS = {
         "next": ["tamam", "yaptım", "oldu", "devam", "sonraki", "bitti", "hazır"],
     },
 }
+
+
+YES_NO = {
+    "en": {"yes": ["yes", "yeah", "yep", "sure", "ok", "okay", "go ahead", "do it", "confirm", "please do", "of course"],
+           "no": ["no", "nope", "don't", "do not", "cancel", "stop", "never mind", "nevermind", "wait"]},
+    "tr": {"yes": ["evet", "tamam", "olur", "yap", "devam", "tabii"],
+           "no": ["hayır", "yok", "iptal", "dur", "vazgeç", "yapma"]},
+}
+
+
+def classify_yes_no(reply, lang):
+    """True, False or None for a spoken answer to a yes/no question. 'No' wins over 'yes'."""
+    if not reply:
+        return None
+    phrase = " " + " ".join("".join(ch if ch.isalnum() or ch.isspace() or ch == "'" else " " for ch in reply.lower()).split()) + " "
+    table = YES_NO.get(lang, YES_NO["en"])
+    if any(f" {w} " in phrase for w in table["no"]):
+        return False
+    if any(f" {w} " in phrase for w in table["yes"]):
+        return True
+    return None
 
 
 def text(config, key):

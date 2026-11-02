@@ -10,6 +10,7 @@ import {DBusSenderChecker} from 'resource:///org/gnome/shell/misc/util.js';
 
 import {Overlay} from './overlay.js';
 import {Input} from './input.js';
+import * as Elements from './elements.js';
 
 const BUS_NAME = 'tr.org.pardus.clicky.Shell';
 const OBJECT_PATH = '/tr/org/pardus/clicky/Shell';
@@ -21,6 +22,10 @@ const IFACE = `
     <method name="Ping"><arg type="s" direction="out" name="version"/></method>
     <method name="Reload"/>
     <method name="GetState"><arg type="s" direction="out" name="json"/></method>
+    <method name="FindElements">
+      <arg type="s" direction="in" name="query_json"/>
+      <arg type="s" direction="out" name="json"/>
+    </method>
     <method name="Screenshot">
       <arg type="s" direction="in" name="path"/>
       <arg type="b" direction="in" name="hide_overlay"/>
@@ -71,17 +76,24 @@ const IFACE = `
   </interface>
 </node>`;
 
+const WINDOW_TYPES = Object.fromEntries(Object.entries(Meta.WindowType).map(([name, value]) => [value, name.toLowerCase()]));
+
 function windowInfo(win, tracker) {
     const r = win.get_frame_rect();
+    const b = win.get_buffer_rect();
     const app = tracker.get_window_app(win);
     return {
+        type: WINDOW_TYPES[win.get_window_type()] ?? '',
         title: win.get_title() ?? '',
         app: app?.get_name() ?? '',
         app_id: app?.get_id() ?? '',
         wm_class: win.get_wm_class() ?? '',
+        pid: win.get_pid(),
         x: r.x, y: r.y, w: r.width, h: r.height,
+        buffer: [b.x, b.y, b.width, b.height],
         focused: win.has_focus(),
         minimized: win.minimized,
+        maximized: win.is_maximized?.() ?? false,
     };
 }
 
@@ -95,6 +107,7 @@ export class Service {
 
         const guarded = {
             GetState: () => new GLib.Variant('(s)', [JSON.stringify(this._state())]),
+            FindElements: query => new GLib.Variant('(s)', [JSON.stringify(Elements.find(JSON.parse(query)))]),
             Screenshot: async (path, hide) => new GLib.Variant('(s)', [JSON.stringify(await this._screenshot(path, hide))]),
             SetState: state => this._overlay.setState(state),
             SetLevel: level => this._overlay.setLevel(level),
@@ -155,8 +168,10 @@ export class Service {
     _state() {
         const tracker = Shell.WindowTracker.get_default();
         const types = [Meta.WindowType.NORMAL, Meta.WindowType.DIALOG, Meta.WindowType.MODAL_DIALOG, Meta.WindowType.UTILITY];
-        const windows = global.display.sort_windows_by_stacking(
-            global.get_window_actors().map(a => a.meta_window).filter(w => types.includes(w.get_window_type()) && !w.is_skip_taskbar()));
+        // list_all_windows also has the desktop-icons window and popup menus, which
+        // the AT-SPI lookups need to place their elements.
+        const all = global.display.sort_windows_by_stacking(global.display.list_all_windows());
+        const windows = all.filter(w => types.includes(w.get_window_type()) && !w.is_skip_taskbar());
         const [px, py] = global.get_pointer();
         const primary = Main.layoutManager.primaryIndex;
         const area = Main.layoutManager.getWorkAreaForMonitor(primary);
@@ -168,6 +183,8 @@ export class Service {
             work_area: {x: area.x, y: area.y, width: area.width, height: area.height},
             monitors: Main.layoutManager.monitors.map(m => ({x: m.x, y: m.y, width: m.width, height: m.height, scale: m.geometry_scale})),
             windows: windows.reverse().map(w => windowInfo(w, tracker)),
+            // Every window, including the desktop-icons window; used to place AT-SPI coordinates.
+            surfaces: all.reverse().map(w => windowInfo(w, tracker)),
         };
     }
 

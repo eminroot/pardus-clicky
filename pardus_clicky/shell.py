@@ -45,6 +45,11 @@ class ShellDriver:
     def state(self):
         return json.loads(self._call("GetState", reply="(s)")[0])
 
+    def find_elements(self, name="", app_id="", type_="", exact=False):
+        """GNOME Shell UI elements (panel, app grid, menus) matching a name, with screen boxes."""
+        query = {"name": name, "app_id": app_id, "type": type_, "exact": exact}
+        return json.loads(self._call("FindElements", "(s)", (json.dumps(query),), "(s)")[0])
+
     def screenshot(self, path, hide_overlay=True):
         return json.loads(self._call("Screenshot", "(sb)", (path, hide_overlay), "(s)", timeout_ms=10000)[0])
 

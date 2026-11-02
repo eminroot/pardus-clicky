@@ -1,5 +1,10 @@
 #!/bin/sh
-# Runs Pardus Clicky from this checkout.
+# Runs Pardus Clicky from this checkout. Uses the local-AI venv (Whisper,
+# Piper) when scripts/install.sh created it; it also sees the system's GTK.
 HERE="$(dirname "$(readlink -f "$0")")"
 export PYTHONPATH="$HERE/..${PYTHONPATH:+:$PYTHONPATH}"
+VENV="${XDG_DATA_HOME:-$HOME/.local/share}/pardus-clicky/venv/bin/python"
+if [ -x "$VENV" ]; then
+    exec "$VENV" -m pardus_clicky "$@"
+fi
 exec python3 -m pardus_clicky "$@"

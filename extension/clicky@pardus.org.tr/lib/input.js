@@ -4,6 +4,7 @@
 
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const MODIFIERS = {
     ctrl: 'Control_L', control: 'Control_L', shift: 'Shift_L', alt: 'Alt_L',
@@ -57,15 +58,47 @@ export class Input {
     }
 
     // Moves the real pointer along a soft curve so the user can follow it.
-    glideTo(x, y, ms) {
+    //
+    // The path never sweeps along the panel: while a panel menu is open, GNOME
+    // opens whichever panel button the pointer passes over (like a menu bar),
+    // so crossing the clock on the way to the system menu would swap menus.
+    // Leaving or entering the panel therefore goes straight up or down first.
+    async glideTo(x, y, ms) {
+        const [x0, y0] = global.get_pointer();
+        const area = Main.layoutManager.getWorkAreaForMonitor(Main.layoutManager.primaryIndex);
+        const top = area.y + 6, bottom = area.y + area.height - 6;
+        const inPanel = py => py < top || py > bottom;
+        const edge = py => (py < top ? top + 10 : bottom - 10);
+        const total = Math.hypot(x - x0, y - y0);
+        const legs = [];
+        if (inPanel(y0) && !inPanel(y) && Math.abs(x - x0) > 30)
+            legs.push([x0, edge(y0)]);
+        if (inPanel(y) && !inPanel(y0) && Math.abs(x - x0) > 30)
+            legs.push([x, edge(y)]);
+        legs.push([x, y]);
+        for (const [lx, ly] of legs) {
+            const [sx, sy] = global.get_pointer();
+            const share = total ? Math.hypot(lx - sx, ly - sy) / total : 1;
+            // eslint-disable-next-line no-await-in-loop
+            await this._glideLeg(lx, ly, ms > 0 ? ms * share : 0);
+        }
+    }
+
+    _glideLeg(x, y, ms) {
         this._glide?.timeline.stop();
         this._glide?.resolve();
         const [x0, y0] = global.get_pointer();
         const dist = Math.hypot(x - x0, y - y0);
-        const duration = ms > 0 ? ms : Math.max(250, Math.min(900, 220 + dist * 0.5));
+        const duration = ms > 0 ? Math.max(120, ms) : Math.max(160, Math.min(900, 160 + dist * 0.5));
+        // Bend upwards, away from the bottom panel.
         const bend = Math.min(90, dist * 0.12);
-        const cx = (x0 + x) / 2 + ((y - y0) / (dist || 1)) * bend;
-        const cy = (y0 + y) / 2 - ((x - x0) / (dist || 1)) * bend;
+        let nx = -(y - y0) / (dist || 1), ny = (x - x0) / (dist || 1);
+        if (ny > 0) {
+            nx = -nx;
+            ny = -ny;
+        }
+        const cx = (x0 + x) / 2 + nx * bend;
+        const cy = (y0 + y) / 2 + ny * bend;
         return new Promise(resolve => {
             const timeline = new Clutter.Timeline({actor: global.stage, duration});
             timeline.set_progress_mode(Clutter.AnimationMode.EASE_IN_OUT_CUBIC);

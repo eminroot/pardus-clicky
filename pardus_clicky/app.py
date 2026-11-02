@@ -9,6 +9,7 @@ import logging
 import shlex
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -23,17 +24,23 @@ try:
 except (ValueError, ImportError):
     AppIndicator = None
 
-from . import APP_ID, APP_NAME, VERSION, hotkey, i18n  # noqa: E402
+from . import APP_ID, APP_NAME, VERSION, a11y, hotkey, i18n, local_ai, recipes  # noqa: E402
+from .a11y import A11y  # noqa: E402
 from .agent import Agent  # noqa: E402
 from .config import CACHE_DIR, Config  # noqa: E402
 from .openai_api import ApiError, OpenAI  # noqa: E402
+from .perform import Hands  # noqa: E402
+from .recipes.matcher import Matcher  # noqa: E402
+from .recipes.world import World  # noqa: E402
+from .router import Router  # noqa: E402
 from .shell import ShellDriver, ShellError  # noqa: E402
 from .voice import Recorder, Speaker  # noqa: E402
 
 log = logging.getLogger("pardus_clicky")
 
 ICON_DIR = Path(__file__).resolve().parent / "data" / "icons"
-STT_HINT = "Pardus, GNOME, masaüstü, Dosyalar, Ayarlar, Firefox, LibreOffice, wallpaper, desktop, folder, Clicky"
+STT_HINT = ("Pardus, GNOME, desktop, wallpaper, background, dark mode, folder, rename, trash, volume, "
+            "Firefox, LibreOffice, Dosyalar, Ayarlar, Resimler, Belgeler, Clicky.")
 
 
 def launcher_command(sub):
@@ -72,6 +79,7 @@ class ClickyApp(Gtk.Application):
         Gtk.Application.do_startup(self)
         setup_logging()
         self.hold()
+        a11y.run_on_main_loop()
         self.driver = ShellDriver()
         self.recorder = Recorder(self.config.get("mic_device", ""))
         self._build_clients()
@@ -104,21 +112,54 @@ class ClickyApp(Gtk.Application):
         pass
 
     def _build_clients(self):
-        self.api = OpenAI(self.config.api_key, self.config.get("openai_base_url"))
-        self.speaker = Speaker(self.api, self.config)
-        self.agent = Agent(self.api, self.driver, self.speaker, self.config, self.listen_blocking)
+        """Speech and brains: on the computer when the local models are installed, else OpenAI."""
+        cfg = self.config
+        lang = cfg.get("language", "en")
+        i18n.set_language(lang)
+        have = local_ai.available(lang)
+        engine = cfg.get("voice_engine", "auto")
+        local_voice = engine == "local" or (engine == "auto" and have["whisper"] and have["piper"])
+        self.api = OpenAI(cfg.api_key, cfg.get("openai_base_url"))
+        if local_voice and have["whisper"]:
+            self.stt = local_ai.LocalTranscriber(lang, beam_size=int(cfg.get("whisper_beam", 1)))
+        else:
+            self.stt = local_ai.CloudTranscriber(self.api, cfg) if cfg.api_key else None
+        tts = local_ai.PiperTTS(lang) if local_voice and have["piper"] else local_ai.CloudTTS(self.api, cfg)
+        self.speaker = Speaker(tts, cfg)
+        self.hands = Hands(self.driver, self.speaker, cfg, self.listen_blocking)
+        self.agent = Agent(self.api, self.hands, cfg)
+        self.world = World()
+        self.router = Router(self.hands, A11y(self.driver), self.world, cfg, self.agent)
+        self.router.set_matcher(Matcher(recipes.load_all()))
+        log.info("voice: %s, understanding: %s, online help: %s",
+                 "on this computer" if isinstance(self.stt, local_ai.LocalTranscriber) else "OpenAI",
+                 "embeddings" if have["embedder"] else "word overlap", "allowed" if cfg.get("brain", "auto") != "local" else "off")
+        threading.Thread(target=self._warm_up, args=(have,), name="warm-up", daemon=True).start()
+
+    def _warm_up(self, have):
+        """Load the local models in the background so the first request is fast."""
+        try:
+            if have["embedder"]:
+                self.router.set_matcher(Matcher(recipes.load_all(), local_ai.Embedder()))
+            if isinstance(self.stt, local_ai.LocalTranscriber):
+                self.stt.load()
+            if isinstance(self.speaker.engine, local_ai.PiperTTS):
+                self.speaker.engine.load()
+            log.info("local models ready")
+        except Exception:  # noqa: BLE001 - fall back to what already works
+            log.exception("loading local models failed")
 
     # ---- actions (main thread) ----
 
     def _on_listen(self, *_):
         if self._listening:
             self.recorder.stop()
-        elif self.agent.running:
-            if self.agent.waiting_for_user:
-                self.agent.interject()
+        elif self.router.running:
+            if self.hands.waiting_for_user:
+                self.hands.interject()
             else:
                 self._run_next(self._listen_and_run)
-                self.agent.cancel()
+                self.hands.cancel()
         else:
             self._run_next(self._listen_and_run)
 
@@ -127,15 +168,15 @@ class ClickyApp(Gtk.Application):
         if not text:
             return
         self._run_next(lambda: self._run_request(text))
-        if self.agent.running:
-            self.agent.cancel()
+        if self.router.running:
+            self.hands.cancel()
 
     def _on_stop(self, *_):
         if self._listening:
             self._discard_recording = True
             self.recorder.stop()
-        if self.agent.running:
-            self.agent.cancel()
+        if self.router.running:
+            self.hands.cancel()
         else:
             self._clear_drawings()
 
@@ -201,23 +242,23 @@ class ClickyApp(Gtk.Application):
             pass
 
     def _ready(self):
-        if not self.config.api_key:
-            self._caption(i18n.text(self.config, "no_key"))
-            GLib.idle_add(self._on_settings)
-            return False
         if not self.driver.ping():
             self._notify(i18n.text(self.config, "no_shell"))
             return False
         return True
 
     def _listen_and_run(self):
+        if self.stt is None:
+            self._caption(i18n.text(self.config, "no_key"))
+            GLib.idle_add(self._on_settings)
+            return
         text = self.listen_blocking()
         if text:
             self._run_request(text)
 
     def _run_request(self, text):
         log.info("request: %s", text)
-        self.agent.run(text)
+        self.router.handle(text)
 
     def listen_blocking(self):
         """Record one utterance and return its text, or None. Runs on the worker thread."""
@@ -239,14 +280,17 @@ class ClickyApp(Gtk.Application):
             d.set_state("idle")
             return None
         d.set_state("thinking")
+        started = time.monotonic()
         try:
-            text = self.api.transcribe(wav, self.config["stt_model"], language=self.config.get("language"), prompt=STT_HINT)
-        except ApiError as exc:
+            # Names on the desktop help the recognizer spell them the way they are written.
+            hint = STT_HINT + " " + ", ".join(self.world.desktop_items()[:20])
+            text = self.stt.transcribe(wav, language=self.config.get("language"), prompt=hint)
+        except (ApiError, OSError, RuntimeError, ValueError) as exc:
             log.error("transcription failed: %s", exc)
             d.caption(i18n.text(self.config, "api_error"), "hint")
             d.set_state("idle")
             return None
-        log.info("heard: %s", text)
+        log.info("heard in %.2fs: %s", time.monotonic() - started, text)
         if not text:
             d.caption(i18n.text(self.config, "heard_nothing"), "hint")
             d.set_state("idle")
@@ -380,9 +424,11 @@ class SettingsWindow(Gtk.Window):
         self.performer.append("user", i18n.text(cfg, "performer_user"))
         self.performer.set_active_id(cfg.get("performer", "assistant"))
         self.shortcut = Gtk.Entry(text=cfg.get("hotkey", ""))
+        self.online = Gtk.Switch(active=cfg.get("brain", "auto") != "local", halign=Gtk.Align.START)
 
-        rows = (("settings_key", self.key), ("settings_language", self.language), ("settings_speak", self.speak),
-                ("settings_performer", self.performer), ("settings_shortcut", self.shortcut))
+        rows = (("settings_online", self.online), ("settings_key", self.key), ("settings_language", self.language),
+                ("settings_speak", self.speak), ("settings_performer", self.performer),
+                ("settings_shortcut", self.shortcut))
         for i, (label, widget) in enumerate(rows):
             grid.attach(Gtk.Label(label=i18n.text(cfg, label), xalign=0), 0, i, 1, 1)
             grid.attach(widget, 1, i, 1, 1)
@@ -403,6 +449,7 @@ class SettingsWindow(Gtk.Window):
         cfg["speak"] = self.speak.get_active()
         cfg["performer"] = self.performer.get_active_id() or "assistant"
         cfg["hotkey"] = self.shortcut.get_text().strip()
+        cfg["brain"] = "auto" if self.online.get_active() else "local"
         self.app.apply_settings()
         self.hide()
 

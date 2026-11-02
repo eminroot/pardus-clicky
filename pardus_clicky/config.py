@@ -16,6 +16,12 @@ CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "
 DEFAULTS = {
     # Spoken and written language of the guide: "en" or "tr".
     "language": "en",
+    # Who handles requests: "auto" = offline recipes first, the online model only for
+    # what no recipe covers; "local" = never go online; "cloud" = always the online model.
+    "brain": "auto",
+    # Speech in and out: "auto" = on this computer when the local models are installed.
+    "voice_engine": "auto",
+    "whisper_beam": 1,
     # Model that looks at the screen and decides each step.
     "model": "gpt-5.6-terra",
     "reasoning_effort": "low",
