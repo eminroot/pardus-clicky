@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Pardus Clicky
+Name[tr]=Pardus Clicky
+Comment=A voice guide that shows you how to use your computer
+Comment[tr]=Bilgisayarını nasıl kullanacağını gösteren sesli rehber
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Utility;Accessibility;Education;
+Keywords=assistant;voice;guide;help;yardım;asistan;rehber;
+StartupNotify=false
+X-GNOME-UsesNotifications=true

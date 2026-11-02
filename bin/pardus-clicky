@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs Pardus Clicky from this checkout.
+HERE="$(dirname "$(readlink -f "$0")")"
+export PYTHONPATH="$HERE/..${PYTHONPATH:+:$PYTHONPATH}"
+exec python3 -m pardus_clicky "$@"

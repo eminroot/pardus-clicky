@@ -1,0 +1,7 @@
+{
+  "uuid": "clicky@pardus.org.tr",
+  "name": "Pardus Clicky",
+  "description": "Draws the Pardus Clicky pointer, captions and sketches above the desktop, and lets the Clicky app see the screen and move the pointer.",
+  "shell-version": ["46", "47", "48", "49"],
+  "version": 1
+}
